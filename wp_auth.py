@@ -108,25 +108,37 @@ def _quota_conn():
 def check_and_consume(wp_id, tier):
     """查配额并扣一次. 返回 (ok, remaining, msg).
 
-    单条 UPSERT 原子递增, 再读回 count 做判断.
-    并发下两个请求可能同时通过检查 (超 1 次), 对搜图配额这种软限制可接受.
+    条件更新: 只有 count < limit 时才递增, 原子且不超限.
+    新用户 (无记录) 且 limit>=1 时插入.
     """
     limit, desc = QUOTA_MAP[tier]
     if limit < 0:
         return True, -1, f"{desc}不限次"
+    if limit == 0:
+        return False, 0, f"{desc}无可用次数"
     day = time.strftime("%Y-%m-%d")
     with _quota_conn() as con:
         c = con.cursor()
+        # 已有记录且未超限: 原子递增
         c.execute(
-            "INSERT INTO usage (wp_id, day, count) VALUES (?,?,1) "
-            "ON CONFLICT (wp_id, day) DO UPDATE SET count=count+1",
-            (wp_id, day))
-        row = c.execute(
-            "SELECT count FROM usage WHERE wp_id=? AND day=?",
-            (wp_id, day)).fetchone()
-        used = row[0] if row else 1
-    if used > limit:
-        return False, 0, f"今日搜图次数已用完 ({desc}: {limit}/天), 明日重置或升级会员"
+            "UPDATE usage SET count=count+1 WHERE wp_id=? AND day=? AND count<?",
+            (wp_id, day, limit))
+        if c.rowcount > 0:
+            row = c.execute(
+                "SELECT count FROM usage WHERE wp_id=? AND day=?",
+                (wp_id, day)).fetchone()
+            used = row[0]
+        else:
+            # 无记录或已达上限: 尝试插入 (仅当无记录时成功)
+            try:
+                c.execute(
+                    "INSERT INTO usage (wp_id, day, count) VALUES (?,?,1)",
+                    (wp_id, day))
+                used = 1
+            except sqlite3.IntegrityError:
+                # 已有记录且已达上限 (并发或之前已满)
+                return False, 0, (
+                    f"今日搜图次数已用完 ({desc}: {limit}/天), 明日重置或升级会员")
     return True, limit - used, f"{desc}今日剩余 {limit - used} 次"
 
 
