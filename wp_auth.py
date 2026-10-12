@@ -21,6 +21,8 @@ import urllib.request
 import urllib.error
 
 WP_BASE = os.environ.get("WP_BASE", "https://www.hhyms.com")
+# Tailscale 内网调用时需覆写 Host 头 (WP_BASE 为 IP 时)
+WP_HOST = os.environ.get("WP_HOST", "")
 VIP_KEY = os.environ.get("ZIBLL_VIP_KEY", "zibll_vip_level")
 VIP_EXPIRE_KEY = os.environ.get("ZIBLL_VIP_EXPIRE_KEY", "zibll_vip_expire")
 LEVEL_KEY = os.environ.get("ZIBLL_LEVEL_KEY", "zibll_user_level")
@@ -44,7 +46,10 @@ def _wp_get(path, username, app_password, timeout=10):
     """调 WP REST API, 返回 dict. 失败抛 RuntimeError."""
     url = WP_BASE.rstrip("/") + path
     cred = base64.b64encode(f"{username}:{app_password}".encode()).decode()
-    req = urllib.request.Request(url, headers={"Authorization": f"Basic {cred}"})
+    headers = {"Authorization": f"Basic {cred}"}
+    if WP_HOST:
+        headers["Host"] = WP_HOST
+    req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode())
