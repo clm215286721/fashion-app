@@ -208,12 +208,14 @@ with gr.Blocks(title="服装拍照找款 MVP") as demo:
                          outputs=intake_log)
 
 if __name__ == "__main__":
+    # 临时禁用登录 (2026-10-12): 会员系统调试中, 先免密使用.
     # 会员登录: WP 用户名 + 应用密码 (WP 后台 用户→个人资料→应用密码 生成).
     # 兼容旧的单账号模式: 若设了 GRADIO_USER 且 WP_BASE 不可用, 降级为单账号.
-    if os.environ.get("WP_BASE", "https://www.hhyms.com"):
-        auth = _wp_auth_cached
-    elif os.environ.get("GRADIO_USER"):
-        auth = (os.environ["GRADIO_USER"], os.environ.get("GRADIO_PASSWORD", ""))
-    else:
-        auth = None
+    # if os.environ.get("WP_BASE"):
+    #     auth = _wp_auth_cached
+    # elif os.environ.get("GRADIO_USER"):
+    #     auth = (os.environ["GRADIO_USER"], os.environ.get("GRADIO_PASSWORD", ""))
+    # else:
+    #     auth = None
+    auth = None
     demo.launch(server_name="0.0.0.0", server_port=7860, auth=auth)
