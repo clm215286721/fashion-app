@@ -107,7 +107,8 @@ def _quota_conn():
 def check_and_consume(wp_id, tier):
     """查配额并扣一次. 返回 (ok, remaining, msg).
 
-    原子操作: 单条 INSERT...ON CONFLICT, 避免 SELECT+UPDATE 竞态.
+    用 BEGIN IMMEDIATE 拿写锁, SELECT+UPDATE 在同一事务内原子执行,
+    兼容所有 SQLite 版本 (不用 RETURNING 语法).
     """
     limit, desc = QUOTA_MAP[tier]
     if limit < 0:
@@ -115,23 +116,26 @@ def check_and_consume(wp_id, tier):
     day = time.strftime("%Y-%m-%d")
     with _quota_conn() as con:
         c = con.cursor()
-        # 原子递增, 返回更新后的值
-        c.execute(
-            "INSERT INTO usage (wp_id, day, count) VALUES (?,?,1) "
-            "ON CONFLICT (wp_id, day) DO UPDATE SET count=count+1 "
-            "RETURNING count",
-            (wp_id, day))
-        used = c.fetchone()[0]
-        con.commit()
-    if used > limit:
-        # 超了, 回滚这一次 (减回去)
-        with _quota_conn() as con:
-            con.execute(
-                "UPDATE usage SET count=count-1 WHERE wp_id=? AND day=?",
+        # IMMEDIATE: 立即拿 RESERVED 锁, 并发写在此排队, 读不阻塞
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            row = c.execute(
+                "SELECT count FROM usage WHERE wp_id=? AND day=?",
+                (wp_id, day)).fetchone()
+            used = row[0] if row else 0
+            if used >= limit:
+                c.execute("ROLLBACK")
+                return False, 0, (
+                    f"今日搜图次数已用完 ({desc}: {limit}/天), 明日重置或升级会员")
+            c.execute(
+                "INSERT INTO usage (wp_id, day, count) VALUES (?,?,1) "
+                "ON CONFLICT (wp_id, day) DO UPDATE SET count=count+1",
                 (wp_id, day))
-            con.commit()
-        return False, 0, f"今日搜图次数已用完 ({desc}: {limit}/天), 明日重置或升级会员"
-    return True, limit - used, f"{desc}今日剩余 {limit - used} 次"
+            c.execute("COMMIT")
+        except Exception:
+            c.execute("ROLLBACK")
+            raise
+    return True, limit - used - 1, f"{desc}今日剩余 {limit - used - 1} 次"
 
 
 def gradio_auth(username, password):
