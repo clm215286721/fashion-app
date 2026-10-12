@@ -51,6 +51,8 @@ def _wp_get(path, username, app_password, timeout=10):
     headers = {"Authorization": f"Basic {cred}"}
     if WP_HOST:
         headers["Host"] = WP_HOST
+    # Cloudflare 后源站需此头才认 HTTPS, 否则应用密码被禁用
+    headers["X-Forwarded-Proto"] = "https"
     req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
