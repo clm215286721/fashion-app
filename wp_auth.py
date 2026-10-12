@@ -12,6 +12,7 @@
 - ZIBLL_MERCHANT_KEY: 商家标记 (默认 'fashion_merchant', 手动在后台给商家用户打标记)
 """
 import base64
+import contextlib
 import json
 import os
 import sqlite3
@@ -56,10 +57,15 @@ def _wp_get(path, username, app_password, timeout=10):
 
 
 def get_wp_user(username, app_password):
-    """验真并取用户信息. 返回 (wp_id, meta_dict)."""
-    me = _wp_get("/wp-json/wp/v2/users/me", username, app_password)
+    """验真并取用户信息. 返回 (wp_id, meta_dict).
+
+    用 context=edit 确保能读到 usermeta (VIP/等级/商家标记).
+    Application Password 认证的用户对自己的数据有 edit 权限.
+    """
+    me = _wp_get("/wp-json/wp/v2/users/me?context=edit", username, app_password)
+    if not isinstance(me, dict):
+        raise RuntimeError("WP API 返回格式异常")
     meta = me.get("meta", {}) or {}
-    # 有些站点 meta 不直接暴露, 降级用 ?context=edit (需权限)
     return me.get("id"), meta
 
 
@@ -90,31 +96,42 @@ def resolve_tier(meta):
 
 def _quota_conn():
     os.makedirs(os.path.dirname(QUOTA_DB), exist_ok=True)
-    con = sqlite3.connect(QUOTA_DB)
+    con = sqlite3.connect(QUOTA_DB, timeout=10)
     con.execute("""CREATE TABLE IF NOT EXISTS usage (
         wp_id INTEGER, day TEXT, count INTEGER DEFAULT 0,
         PRIMARY KEY (wp_id, day))""")
-    return con
+    con.commit()
+    return contextlib.closing(con)
 
 
 def check_and_consume(wp_id, tier):
-    """查配额并扣一次. 返回 (ok, remaining, msg)."""
+    """查配额并扣一次. 返回 (ok, remaining, msg).
+
+    原子操作: 单条 INSERT...ON CONFLICT, 避免 SELECT+UPDATE 竞态.
+    """
     limit, desc = QUOTA_MAP[tier]
     if limit < 0:
         return True, -1, f"{desc}不限次"
     day = time.strftime("%Y-%m-%d")
     with _quota_conn() as con:
-        row = con.execute(
-            "SELECT count FROM usage WHERE wp_id=? AND day=?", (wp_id, day)
-        ).fetchone()
-        used = row[0] if row else 0
-        if used >= limit:
-            return False, 0, f"今日搜图次数已用完 ({desc}: {limit}/天), 明日重置或升级会员"
-        con.execute(
+        c = con.cursor()
+        # 原子递增, 返回更新后的值
+        c.execute(
             "INSERT INTO usage (wp_id, day, count) VALUES (?,?,1) "
-            "ON CONFLICT (wp_id, day) DO UPDATE SET count=count+1",
+            "ON CONFLICT (wp_id, day) DO UPDATE SET count=count+1 "
+            "RETURNING count",
             (wp_id, day))
-    return True, limit - used - 1, f"{desc}今日剩余 {limit - used - 1} 次"
+        used = c.fetchone()[0]
+        con.commit()
+    if used > limit:
+        # 超了, 回滚这一次 (减回去)
+        with _quota_conn() as con:
+            con.execute(
+                "UPDATE usage SET count=count-1 WHERE wp_id=? AND day=?",
+                (wp_id, day))
+            con.commit()
+        return False, 0, f"今日搜图次数已用完 ({desc}: {limit}/天), 明日重置或升级会员"
+    return True, limit - used, f"{desc}今日剩余 {limit - used} 次"
 
 
 def gradio_auth(username, password):
