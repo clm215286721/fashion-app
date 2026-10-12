@@ -78,6 +78,33 @@ def get_wp_user(username, app_password):
     return me.get("id"), meta
 
 
+def auth_via_plugin(username, login_password, timeout=10):
+    """用自建插件接口验证 (用户名+登录密码, 非应用密码). 返回 (wp_id, tier).
+    
+    插件: fashion-auth.php, 接口: POST /wp-json/fashion/v1/auth
+    """
+    import urllib.parse
+    url = WP_BASE.rstrip("/") + "/wp-json/fashion/v1/auth"
+    data = urllib.parse.urlencode({"username": username, "password": login_password}).encode()
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    if WP_HOST:
+        headers["Host"] = WP_HOST
+    headers["X-Forwarded-Proto"] = "https"
+    req = urllib.request.Request(url, data=data, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            resp = json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            raise RuntimeError("WP 用户名或密码错误")
+        raise RuntimeError(f"WP 认证接口错误: HTTP {e.code}")
+    except Exception as e:
+        raise RuntimeError(f"WP 连接失败: {e}")
+    if not isinstance(resp, dict) or "tier" not in resp:
+        raise RuntimeError("WP 认证接口返回异常")
+    return resp["wp_id"], resp["tier"]
+
+
 def resolve_tier(meta):
     """按 usermeta 判定档位. 返回 tier key (见 QUOTA_MAP)."""
     now = int(time.time())
@@ -166,7 +193,16 @@ def gradio_auth(username, password):
 
 
 def get_user_tier(username, app_password):
-    """取用户档位 (搜图时用). 返回 (wp_id, tier, desc)."""
-    wp_id, meta = get_wp_user(username, app_password)
-    tier = resolve_tier(meta)
-    return wp_id, tier, QUOTA_MAP[tier][1]
+    """取用户档位 (搜图时用). 返回 (wp_id, tier, desc).
+    
+    优先用插件接口 (用户名+登录密码), 失败则回退到应用密码方式.
+    """
+    try:
+        # 新方法: 插件接口, 用 WP 登录密码
+        wp_id, tier = auth_via_plugin(username, app_password)
+        return wp_id, tier, QUOTA_MAP[tier][1]
+    except RuntimeError:
+        # 回退: 应用密码方式
+        wp_id, meta = get_wp_user(username, app_password)
+        tier = resolve_tier(meta)
+        return wp_id, tier, QUOTA_MAP[tier][1]
