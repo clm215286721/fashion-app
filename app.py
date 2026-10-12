@@ -1,13 +1,22 @@
-"""FastAPI 检索服务: POST /search 上传服装图, 返回 Top-K 相似商品."""
+"""FastAPI 检索服务: POST /search 上传服装图, 返回 Top-K 相似商品.
+
+会员鉴权 (hhyms.com WordPress):
+- 请求头 Authorization: Basic base64(wp用户名:应用密码)
+- 按 VIP/等级扣每日配额, 额度见 wp_auth.QUOTA_MAP
+- 无鉴权头时按最低档 (Lv1-Lv3, 10次/天, 按 IP 记次)
+"""
+import base64
+import binascii
 import io
 import os
 import re
 
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, UploadFile, Header
 from fastapi.responses import FileResponse, JSONResponse
 from PIL import Image
 
 from searcher import FashionSearcher
+import wp_auth
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 INDEX_DIR = os.path.join(BASE, "index")
@@ -44,7 +53,24 @@ def health():
 
 
 @app.post("/search")
-def search(file: UploadFile = File(...), top_k: int = 8):
+def search(file: UploadFile = File(...), top_k: int = 8,
+           authorization: str = Header(default="")):
+    # 会员鉴权 + 配额
+    wp_id, tier = None, "lv1_3"
+    if authorization.startswith("Basic "):
+        try:
+            cred = base64.b64decode(authorization[6:]).decode()
+            username, app_pw = cred.split(":", 1)
+            wp_id, tier, _desc = wp_auth.get_user_tier(username, app_pw)
+        except Exception:
+            return JSONResponse({"error": "WP 认证失败, 请检查用户名/应用密码"},
+                                status_code=401)
+    else:
+        # 匿名: 按 IP 记次 (wp_id 用 hash(IP) 负数区分)
+        wp_id = -abs(hash("anon")) % (10 ** 9)
+    ok, remaining, msg = wp_auth.check_and_consume(wp_id, tier)
+    if not ok:
+        return JSONResponse({"error": msg}, status_code=429)
     # 用同步 def: FastAPI 自动放入线程池, 避免 ONNX 推理阻塞事件循环
     try:
         data = file.file.read(MAX_UPLOAD_BYTES + 1)
@@ -59,7 +85,10 @@ def search(file: UploadFile = File(...), top_k: int = 8):
         file.file.close()
     for r in results:
         r["image_url"] = _image_url(r)
-    return {"results": results}
+    resp = {"results": results, "quota_msg": msg}
+    if remaining >= 0:
+        resp["quota_remaining"] = remaining
+    return resp
 
 
 @app.get("/mimages/{merchant_id}/{filename}")

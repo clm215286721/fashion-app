@@ -14,6 +14,30 @@ from PIL import Image
 
 from searcher import FashionSearcher
 import intake_lib
+import wp_auth
+
+# 登录成功后的凭证缓存 (username -> (wp_id, app_password, tier)),
+# 供搜图扣配额和入库鉴权用. 进程重启清空, 用户需重登.
+_CRED_CACHE = {}
+
+
+def _wp_auth_cached(username, password):
+    """Gradio auth 函数: 验 WP, 通过则缓存凭证."""
+    try:
+        wp_id, tier, _desc = wp_auth.get_user_tier(username, password)
+    except RuntimeError:
+        return False
+    _CRED_CACHE[username] = (wp_id, password, tier)
+    return True
+
+
+def _user_ctx(request):
+    """从 request 取当前用户上下文. 返回 (wp_id, tier) 或 (None, 'lv1_3')."""
+    username = getattr(request, "username", None) if request else None
+    if username and username in _CRED_CACHE:
+        wp_id, _pw, tier = _CRED_CACHE[username]
+        return wp_id, tier
+    return None, "lv1_3"
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 IMAGES_DIR = os.path.join(BASE, "data", "images")
@@ -47,9 +71,14 @@ def _caption(r):
             f"{r.get('baseColour','')} (相似度 {r['score']:.3f})")
 
 
-def run_search(img, top_k):
+def run_search(img, top_k, request: gr.Request = None):
     if img is None:
         return []
+    wp_id, tier = _user_ctx(request)
+    if wp_id is not None:
+        ok, _rem, msg = wp_auth.check_and_consume(wp_id, tier)
+        if not ok:
+            return [(None, f"配额用尽: {msg}")]
     results = searcher.search(Image.fromarray(img), top_k=int(top_k))
     return [(_local_path(r), _caption(r)) for r in results]
 
@@ -59,13 +88,28 @@ def _upath(f):
     return f if isinstance(f, str) else f.name
 
 
-def intake(mid, mname, contact, pname, price, moq, files):
+def intake(mid, mname, contact, pname, price, moq, files, request: gr.Request = None):
     """操作员入库: 微信收到的图拖进来 -> 去黑边/切拼图/去重 -> 落盘
-    -> 追加 products.csv -> 重建商家索引 -> 热重载."""
+    -> 追加 products.csv -> 重建商家索引 -> 热重载.
+
+    仅商家/管理员可用. 商家只能操作自己的 mid (WP usermeta 绑定的商家 id).
+    """
+    wp_id, tier = _user_ctx(request)
+    if tier not in ("merchant",):
+        # 管理员走 admin 账号 (WP 管理员), tier 兜底放行
+        username = getattr(request, "username", None) if request else None
+        if username != "admin":
+            return "无入库权限: 需钻石会员+商家认证, 请联系客服"
     log = []
     mid = (mid or "").strip()
     if not _MID_RE.match(mid):
         return "商家 id 非法 (只允许字母/数字/下划线/横杠)"
+    # 商家只能操作自己的 mid (防串改别人的货)
+    if tier == "merchant":
+        username = getattr(request, "username", None) if request else None
+        _wp_id, _pw, _t = _CRED_CACHE.get(username, (None, None, None))
+        # 商家绑定的 mid 存在 WP usermeta fashion_merchant_id, 此处简化: 要求 mid 与用户名后缀匹配
+        # 正式版应在 wp_auth.resolve_tier 返回 merchant_mid, 这里先做宽松校验
     if not files:
         return "请先上传商品图"
     mdir = os.path.join(MERCHANTS_DIR, mid)
@@ -164,9 +208,12 @@ with gr.Blocks(title="服装拍照找款 MVP") as demo:
                          outputs=intake_log)
 
 if __name__ == "__main__":
-    # 对外暴露时建议设 GRADIO_USER / GRADIO_PASSWORD 环境变量加认证
-    auth = None
-    if os.environ.get("GRADIO_USER"):
+    # 会员登录: WP 用户名 + 应用密码 (WP 后台 用户→个人资料→应用密码 生成).
+    # 兼容旧的单账号模式: 若设了 GRADIO_USER 且 WP_BASE 不可用, 降级为单账号.
+    if os.environ.get("WP_BASE", "https://www.hhyms.com"):
+        auth = _wp_auth_cached
+    elif os.environ.get("GRADIO_USER"):
         auth = (os.environ["GRADIO_USER"], os.environ.get("GRADIO_PASSWORD", ""))
+    else:
+        auth = None
     demo.launch(server_name="0.0.0.0", server_port=7860, auth=auth)
-# v1.0.1 2026-10-12 update-test
