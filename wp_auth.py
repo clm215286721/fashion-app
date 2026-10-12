@@ -45,6 +45,8 @@ QUOTA_MAP = {
 def _wp_get(path, username, app_password, timeout=10):
     """调 WP REST API, 返回 dict. 失败抛 RuntimeError."""
     url = WP_BASE.rstrip("/") + path
+    # 应用密码的空格仅为可读性, 实际使用时去掉
+    app_password = app_password.replace(" ", "")
     cred = base64.b64encode(f"{username}:{app_password}".encode()).decode()
     headers = {"Authorization": f"Basic {cred}"}
     if WP_HOST:
