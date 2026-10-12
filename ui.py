@@ -169,3 +169,4 @@ if __name__ == "__main__":
     if os.environ.get("GRADIO_USER"):
         auth = (os.environ["GRADIO_USER"], os.environ.get("GRADIO_PASSWORD", ""))
     demo.launch(server_name="0.0.0.0", server_port=7860, auth=auth)
+# v1.0.1 2026-10-12 update-test
