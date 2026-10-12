@@ -1,0 +1,9 @@
+# 模型/数据/索引/虚拟环境都不进仓库（已在云电脑上）
+models/
+data/
+index/
+venv/
+__pycache__/
+*.pyc
+*.log
+.DS_Store
